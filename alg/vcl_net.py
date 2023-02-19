@@ -6,12 +6,29 @@ from torch import nn
 import numpy as np
 from torch.distributions import kl_divergence, Normal
 from collections import OrderedDict
+from enum import Enum, auto
+
+
+class Initialization(Enum):
+    DEFAULT = auto()
+    RANDOM = auto()
+    SMALL_VARIANCE = auto()
+
+
+def init_layer_small_variance(layer: BayesLinear):
+    layer.weight_loc.data = torch.zeros_like(layer.weight_loc.data)
+    layer.bias_loc.data = torch.zeros_like(layer.bias_loc.data)
+    # initialize to very small value for the first model
+    layer.log_weight_scale.data = torch.zeros_like(
+        layer.log_weight_scale.data) - 3
+    layer.log_bias_scale.data = torch.zeros_like(layer.log_bias_scale.data) - 3
 
 
 def init_layer_by_random(layer: BayesLinear):
-    layer.weight_loc.data = torch.randn_like(
-        layer.weight_loc.data) * 0.1
-    layer.bias_loc.data = torch.randn_like(layer.bias_loc.data) * 0.1
+    layer.weight_loc.data = nn.init.normal_(
+        torch.zeros_like(layer.weight_loc.data), std=0.1)
+    layer.bias_loc.data = nn.init.normal_(
+        torch.zeros_like(layer.bias_loc.data), std=0.1)
     layer.log_weight_scale.data = torch.zeros_like(
         layer.log_weight_scale.data) - 3
     layer.log_bias_scale.data = torch.zeros_like(
@@ -19,7 +36,7 @@ def init_layer_by_random(layer: BayesLinear):
 
 
 class MultiHeadVCL(nn.Module):
-    def __init__(self, in_dim: int, shared_hidden_dims: List[int], head_hidden_dims: List[int], head_out_dim: int, num_heads=1, random_initialize: bool = False):
+    def __init__(self, in_dim: int, shared_hidden_dims: List[int], head_hidden_dims: List[int], head_out_dim: int, num_heads=1, initialization: Initialization = Initialization.DEFAULT):
         super(MultiHeadVCL, self).__init__()
 
         self.in_dim = in_dim
@@ -38,21 +55,25 @@ class MultiHeadVCL(nn.Module):
         self.layer_dict["shared"] = self.shared
         self.layer_dict["heads"] = self.heads
 
-        if random_initialize:
-            with torch.no_grad():
-                for key in self.layer_dict:
-                    if key == 'heads':
-                        for head in self.layer_dict[key]:
-                            head.reinit_each_layer_with(init_layer_by_random)
-                    else:
+        with torch.no_grad():
+            for key in self.layer_dict:
+                if key == 'heads':
+                    for head in self.layer_dict[key]:
+                        if initialization is not Initialization.DEFAULT:
+                            assert initialization is Initialization.RANDOM or initialization is Initialization.SMALL_VARIANCE
+                            head.reinit_each_layer_with(
+                                init_layer_by_random if initialization is Initialization.RANDOM else init_layer_small_variance)
+                else:
+                    if initialization is not Initialization.DEFAULT:
+                        assert initialization is Initialization.RANDOM or initialization is Initialization.SMALL_VARIANCE
                         self.layer_dict[key].reinit_each_layer_with(
-                            init_layer_by_random)
+                            init_layer_by_random if initialization is Initialization.RANDOM else init_layer_small_variance)
 
     @staticmethod
     def new_from_prior(prior_model: 'MultiHeadVCL') -> 'MultiHeadVCL':
         device = prior_model.shared.layers[0].weight_loc.data.get_device()
         model = MultiHeadVCL(in_dim=prior_model.in_dim, shared_hidden_dims=prior_model.shared_hidden_dims, head_hidden_dims=prior_model.head_hidden_dims,
-                             head_out_dim=prior_model.head_out_dim, num_heads=len(prior_model.heads), random_initialize=False).to(device)
+                             head_out_dim=prior_model.head_out_dim, num_heads=len(prior_model.heads)).to(device)
         with torch.no_grad():
             for key in model.layer_dict:
                 if key == 'heads':
@@ -82,14 +103,19 @@ class MultiHeadVCL(nn.Module):
                              self.prior_model_log_scales)
             return prior
 
-    def init_shared_weights(self, random_initialize=False):
+    def init_shared_weights(self, initialization: Initialization):
         with torch.no_grad():
-            if not random_initialize:
+            if initialization is Initialization.DEFAULT:
                 self.shared.reinit_each_layer()
-            else:
+            elif initialization is Initialization.RANDOM:
                 self.shared.reinit_each_layer_with(init_layer_by_random)
+            elif initialization is Initialization.SMALL_VARIANCE:
+                self.shared.reinit_each_layer_with(init_layer_small_variance)
+            else:
+                raise ValueError(
+                    "Unexpected initialization config: ", initialization)
 
-    def add_head(self, random_initialize=False):
+    def add_head(self, initialization: Initialization):
         device = self.shared.layers[0].weight_loc.data.get_device()
         self.heads: List[BayesNet] = nn.ModuleList([head for head in self.heads] + [BayesNet(
             self.shared_hidden_dims[-1], self.head_hidden_dims, self.head_out_dim).to(device)])
@@ -104,8 +130,17 @@ class MultiHeadVCL(nn.Module):
                 self.prior_model_log_scales = torch.cat(
                     (self.prior_model_log_scales, log_scales.detach().clone()))
 
-        if random_initialize:
-            self.heads[-1].reinit_each_layer_with(init_layer_by_random)
+        with torch.no_grad():
+            if initialization is Initialization.DEFAULT:
+                self.heads[-1].reinit_each_layer()
+            elif initialization is Initialization.RANDOM:
+                self.heads[-1].reinit_each_layer_with(init_layer_by_random)
+            elif initialization is Initialization.SMALL_VARIANCE:
+                self.heads[-1].reinit_each_layer_with(
+                    init_layer_small_variance)
+            else:
+                raise ValueError(
+                    "Unexpected initialization config: ", initialization)
 
     def predict(self, x, task_i_mask: Union[int, np.int64, torch.Tensor], n_particles):
         device = x.get_device()
@@ -123,6 +158,9 @@ class MultiHeadVCL(nn.Module):
             logits_samples = [torch.zeros((x.shape[0], self.head_out_dim)).to(
                 device) for i in range(n_particles)]
             for task_i, mask in task_datapoints:
+                if task_i >= len(self.heads):
+                    print(task_i, mask)
+                    raise Exception("Invalid task mask")
                 task_logits_samples = self.heads[task_i].forward(
                     [hidden[mask] for hidden in hiddens], x_is_sample=True, activation_fns=nn.Identity(), n_particles=n_particles)
                 for logits, task_logits in zip(logits_samples, task_logits_samples):
@@ -204,14 +242,14 @@ class MultiHeadVCL(nn.Module):
 
 
 class MultiHeadVCLSplitMNIST(MultiHeadVCL):
-    def __init__(self, num_heads=1, random_initialize=False):
+    def __init__(self, num_heads=1, initialization: Initialization = Initialization.DEFAULT):
         # "We use fully connected multi-head networks with two hidden layers comprising 256 hidden units with ReLU activations."
         super(MultiHeadVCLSplitMNIST, self).__init__(
-            in_dim=28*28, shared_hidden_dims=[256, 256], head_hidden_dims=[], head_out_dim=2, num_heads=num_heads, random_initialize=random_initialize)
+            in_dim=28*28, shared_hidden_dims=[256, 256], head_hidden_dims=[], head_out_dim=2, num_heads=num_heads, initialization=initialization)
 
 
 class MultiHeadVCLSplitNotMNIST(MultiHeadVCL):
-    def __init__(self, num_heads=1, random_initialize=False):
+    def __init__(self, num_heads=1, initialization: Initialization = Initialization.DEFAULT):
         # "The settings for this experiment are the same as those in the Split MNIST experiment above, except that we use deeper networks with 4 hidden layers, each of which contains 150 hidden units."
         super(MultiHeadVCLSplitNotMNIST, self).__init__(
-            in_dim=28*28, shared_hidden_dims=[150, 150, 150, 150], head_hidden_dims=[], head_out_dim=2, num_heads=num_heads, random_initialize=random_initialize)
+            in_dim=28*28, shared_hidden_dims=[150, 150, 150, 150], head_hidden_dims=[], head_out_dim=2, num_heads=num_heads, initialization=initialization)

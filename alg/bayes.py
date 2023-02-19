@@ -106,7 +106,7 @@ class BayesNet(nn.Module):
         activation_fns = activation_fns if type(activation_fns) is list else [
             activation_fns for _ in range(len(self.layers))]
         for i, layer in enumerate(self.layers):
-            x = layer(x, activation_fn[i])
+            x = layer.forward_MLE(x, activation_fn[i])
         return x
 
     def get_params(self):
@@ -126,15 +126,21 @@ class BayesNet(nn.Module):
             next_i += count
 
     def reinit_each_layer(self):
+        device = self.layers[0].weight_loc.data.get_device()
         for layer in self.layers:
             layer.init_parameters()
+        if device != -1:
+            self.to(device)
 
     def reinit_each_layer_with(self, init_fn):
         """
             Initialises each layer by a given function. Caller must ensure that init_fn modifies in place.
         """
+        device = self.layers[0].weight_loc.data.get_device()
         for layer in self.layers:
             init_fn(layer)
+        if device != -1:
+            self.to(device)
 
 
 # just some tests here to ensure set_params/get_params is sound
