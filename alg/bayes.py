@@ -102,11 +102,11 @@ class BayesNet(nn.Module):
             x = layer(x, True, activation_fns[i], n_particles)
         return x
 
-    def forward_MLE(self, x: torch.Tensor, activation_fn: Union[List[nn.Module], nn.Module]):
+    def forward_MLE(self, x: torch.Tensor, activation_fns: Union[List[nn.Module], nn.Module]):
         activation_fns = activation_fns if type(activation_fns) is list else [
             activation_fns for _ in range(len(self.layers))]
         for i, layer in enumerate(self.layers):
-            x = layer.forward_MLE(x, activation_fn[i])
+            x = layer.forward_MLE(x, activation_fns[i])
         return x
 
     def get_params(self):
