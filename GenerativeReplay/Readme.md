@@ -1,4 +1,4 @@
-This folder contains GR to VCL with/without Coreset.
+This folder contains GR to VCL with/without Coreset on Split-Datasets.
 
 Results are presented in several Notebooks, just due to convenience in training on Colab. The functions in different notebooks are actually the same.
 
