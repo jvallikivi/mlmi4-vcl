@@ -1,5 +1,4 @@
 from typing import Union
-from alg.bayes import BayesLinear
 
 import torch
 from torch import nn
@@ -18,33 +17,25 @@ class Encoder(nn.Module):
             self.layers.append(nn.Sequential(
                 nn.Linear(in_dim if i == 0 else hidden_dim, hidden_dim), nn.ReLU()))
 
-        self.head = BayesLinear(
-            hidden_dim if num_hidden > 0 else in_dim, emb_dim)
-
-        self.prior_locs, self.prior_logscales = BayesLinear(
-            hidden_dim if num_hidden > 0 else in_dim, emb_dim).get_params()
-        self.prior_locs = nn.Parameter(self.prior_locs, requires_grad=False)
-        self.prior_logscales = nn.Parameter(
-            self.prior_logscales, requires_grad=False)
+        self.head_loc = nn.Linear(hidden_dim, emb_dim)
+        self.head_scale = nn.Linear(hidden_dim, emb_dim)
 
     def forward(self, x, num_samples=1):
         for layer in self.layers:
             x = layer(x)
 
-        out = self.head.forward(x, False, nn.Identity(), num_samples)
-        # Also return KL divergence
-        locs, logscales = self.head.get_params()
-        KL = kl_divergence(Normal(loc=locs, scale=torch.exp(logscales)),
-                           Normal(loc=self.prior_locs, scale=torch.exp(
-                               self.prior_logscales))
-                           )
-        return out, KL
+        loc = self.head_loc(x)
+        scale = torch.exp(self.head_scale(x))
+        out = []
+        for _ in range(num_samples):
+            out.append(loc + torch.randn_like(scale) * scale)
+        return out, kl_divergence(Normal(loc, scale), Normal(0, 1)).sum()
 
     def forward_MLE(self, x):
         for layer in self.layers:
             x = layer(x)
 
-        out = self.head.forward_MLE(x, nn.Identity())
+        out = self.head_loc(x)
         return out
 
 
@@ -71,33 +62,26 @@ class ConvolutionalEncoder(nn.Module):
         self.heights = heights
 
         self.flattened_size = int(conv_output_c[-1] * widths[-1] * widths[-1])
-        self.head = BayesLinear(self.flattened_size, emb_dim)
-
-        prior_locs, prior_logscales = BayesLinear(
-            self.flattened_size, emb_dim).get_params()
-        self.prior_locs = nn.Parameter(prior_locs, requires_grad=False)
-        self.prior_logscales = nn.Parameter(
-            prior_logscales, requires_grad=False)
+        self.head_loc = nn.Linear(self.flattened_size, emb_dim)
+        self.head_scale = nn.Linear(self.flattened_size, emb_dim)
 
     def forward(self, x, num_samples=1):
         for layer in self.layers:
             x = layer(x)
 
         x = nn.Flatten(start_dim=0 if x.dim() == 3 else 1)(x)
-        out = self.head.forward(x, False, nn.Identity(), num_samples)
-        # Also return KL divergence
-        locs, logscales = self.head.get_params()
-        KL = kl_divergence(Normal(loc=locs, scale=torch.exp(logscales)),
-                           Normal(loc=self.prior_locs, scale=torch.exp(
-                               self.prior_logscales))
-                           )
-        return out, KL
+        loc = self.head_loc(x)
+        scale = torch.exp(self.head_scale(x))
+        out = []
+        for _ in range(num_samples):
+            out.append(loc + torch.randn_like(scale) * scale)
+        return out, kl_divergence(Normal(loc, scale), Normal(0, 1)).sum()
 
     def forward_MLE(self, x):
         for layer in self.layers:
             x = layer(x)
 
-        out = self.head.forward_MLE(x, nn.Identity())
+        out = self.head_loc(x)
         return out
 
 
