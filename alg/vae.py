@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.distributions import kl_divergence, Normal
 import numpy as np
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 
 class Encoder(nn.Module):
@@ -156,12 +156,12 @@ class VariationalAutoencoder(nn.Module):
     def forward(self, x):
         return self.encoder(x, 1)[0][0]
 
-    def calculate_loss(self, x, dataset_size, num_samples=1):
+    def calculate_loss(self, x, num_samples=1):
         embeddings, KL = self.encoder(x, num_samples)
         loss = 0
         for embedding in embeddings:
             loss += torch.sum(torch.pow(x - self.decoder(embedding), 2.0))
-        return loss / x.shape[0] / num_samples + KL.sum() / dataset_size
+        return loss / x.shape[0] / num_samples + KL / x.shape[0]
 
     def autoencode(self, x):
         return self.decoder(self(x))
@@ -188,12 +188,12 @@ class ConvolutionalVariationalAutoencoder(nn.Module):
     def forward(self, x):
         return self.encoder(x, 1)[0][0]
 
-    def calculate_loss(self, x, dataset_size, num_samples=1):
+    def calculate_loss(self, x, num_samples=1):
         embeddings, KL = self.encoder(x, num_samples)
         loss = 0
         for embedding in embeddings:
             loss += torch.sum(torch.pow(x - self.decoder(embedding), 2.0))
-        return loss / x.shape[0] / num_samples + KL.sum() / dataset_size
+        return loss / x.shape[0] / num_samples + KL / x.shape[0]
 
     def autoencode(self, x):
         return self.decoder(self(x[None, :, :, :]))
@@ -201,13 +201,13 @@ class ConvolutionalVariationalAutoencoder(nn.Module):
 
 def train_variational_autoencoder(model: Union[VariationalAutoencoder, ConvolutionalVariationalAutoencoder], data, n_epochs=100, batch_size=256, verbose=False):
     opt = torch.optim.Adam(model.parameters(), lr=0.001)
-    for epoch in ((lambda x: tqdm(x, desc='Training VAE')) if verbose else iter)(range(n_epochs)):
+    for epoch in ((lambda x: tqdm(x, desc='Training VAE', position=2, leave=False)) if verbose else iter)(range(n_epochs)):
         for batch in range(int(np.ceil(data.shape[0] / batch_size))):
             batch_idx0 = batch * batch_size
             batch_idx1 = batch * batch_size + batch_size
             opt.zero_grad()
             loss = model.calculate_loss(
-                x=data[batch_idx0: batch_idx1], dataset_size=data.shape[0], num_samples=1)
+                x=data[batch_idx0: batch_idx1], num_samples=1)
             loss.backward()
             nn.utils.clip_grad_value_(model.parameters(), 5)
             opt.step()

@@ -237,6 +237,25 @@ class MultiHeadVCL(nn.Module):
         nELBO = nELBO / n_particles / x.shape[0] + KL.sum() / dataset_size
         return nELBO
 
+    def calculate_GVCL_ELBO(self, x, y, task_i_mask, n_particles, dataset_size, _lambda, beta):
+        locs, logscales = self.get_params()
+
+        Sigma_inv_T_lambda = _lambda * torch.clamp(
+            torch.exp(self.prior_model_log_scales)**(-2) - 1, min=1e-3) + 1
+        gvclKL = ((locs - self.prior_model_locs) ** 2 * Sigma_inv_T_lambda).sum() + (torch.exp(self.prior_model_log_scales)
+                                                                                     ** (-2) * torch.exp(logscales) ** 2).sum() + 2 * (self.prior_model_log_scales - logscales).sum() - locs.shape[0]
+        gvclKL = gvclKL / 2
+
+        nELBO = 0
+        for _ in range(n_particles):
+            logit = self.predict(x, task_i_mask, 1)[0]
+            neg_log_p = nn.CrossEntropyLoss(reduction='sum')(logit, y)
+            nELBO = neg_log_p + nELBO
+        nELBO = nELBO / n_particles / \
+            x.shape[0] + beta * gvclKL.sum() / dataset_size
+        # since the ELBO can be viewed as an MC estimator over dataset. Keep the magnitude same is of vital importance!!!
+        return nELBO
+
     def MLE_loss(self, x, y, task_i_mask: Union[torch.Tensor, int]):
         logit = self.predict_MLE(x, task_i_mask)
         loss = nn.CrossEntropyLoss(reduction='mean')(logit, y)
