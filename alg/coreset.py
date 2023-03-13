@@ -2,8 +2,24 @@ from typing import Any, Union
 import numpy as np
 import torch
 from torch import nn
+from sklearn.cluster import KMeans, AgglomerativeClustering, SpectralClustering
+
 from alg.kcenter import KCenter
 from alg.vae import VariationalAutoencoder, train_variational_autoencoder, ConvolutionalVariationalAutoencoder
+
+
+def get_medoid_idxs(centers, data):
+    medoid_idxs = []
+    for center in centers:
+        medoid_idxs.append(np.argmin(np.linalg.norm(data - center, axis=1)))
+    return np.array(medoid_idxs)
+
+
+def get_medoid_idxs_from_labels(labels, data):
+    centers = [np.mean(data[labels == label], axis=0)
+               for label in np.unique(labels)]
+    return get_medoid_idxs(centers, data)
+
 
 class CoresetConfig:
     method: str
@@ -15,30 +31,33 @@ class CoresetConfig:
 
     def __init__(self, method='random', post_process_method=None, task_coreset_size=40, device: str = None, **config):
         ## <Input validation> ##
-        if method not in ['random', 'k-center', 'vae-k-center']:
+        if method not in ['random', 'k-center', 'vae-k-center', 'vae-k-means', 'vae-hierarchical', 'vae-spectral']:
             raise ValueError(f"Invalid coreset builder method: {method}")
         if post_process_method is not None:
             assert post_process_method in [
                 'shared-emb-mult', 'shared-emb-mult-per-task']
-        
+
         invalid_config_keys = []
         allowed_config_keys = ['vae_params']
         for key in config.keys():
             if key not in allowed_config_keys:
                 invalid_config_keys.append(key)
-        
+
         if len(invalid_config_keys) > 0:
-            raise ValueError(f"Invalid additional config keys: {invalid_config_keys}. Allowed: {allowed_config_keys}")
+            raise ValueError(
+                f"Invalid additional config keys: {invalid_config_keys}. Allowed: {allowed_config_keys}")
         ## </Input validation> ##
 
         self.method = method
         self.post_process_method = post_process_method
         self.size = task_coreset_size
-        self.device = device if device is not None else ("cuda:0" if torch.cuda.is_available() else "cpu")
+        self.device = device if device is not None else (
+            "cuda:0" if torch.cuda.is_available() else "cpu")
 
-        if method == 'vae-k-center':
+        if 'vae' in method:
             if 'vae_params' in config:
-                self.vae_params = config['vae_params']
+                self.vae_params = config['vae_params'] if config['vae_params'] is not None else {
+                }
             else:
                 self.vae_params = {}
 
@@ -50,31 +69,52 @@ class Coreset:
 
     def update(self, data_x, data_y, task_idx):
         if self.config.method == 'random':
-            coreset_idx = np.random.choice(data_x.shape[0], self.config.size, False)
+            coreset_idx = np.random.choice(
+                data_x.shape[0], self.config.size, False)
         elif self.config.method == 'k-center':
             data_ = data_x.cpu().detach().numpy()
             if data_x.dim() == 4:
                 data_ = data_.reshape(data_.shape[0], -1)
-            coreset_idx = np.array(KCenter(self.config.size).fit_transform(data_))
-        elif self.config.method == 'vae-k-center':
+            coreset_idx = np.array(
+                KCenter(self.config.size).fit_transform(data_))
+        elif 'vae' in self.config.method:
             if data_x.dim() == 4:
-                if len(self.config.vae_params) > 0:
-                    print("Warning: vae-params not implemented for convolutional variational autoencoder.")
+                if len(self.config.vae_params.keys()) > 0:
+                    print(
+                        "Warning: vae-params not implemented for convolutional variational autoencoder.")
                 model = ConvolutionalVariationalAutoencoder(
-                    in_channels=data_x.shape[1], 
-                    image_height=data_x.shape[2], 
-                    image_width=data_x.shape[3], 
+                    in_channels=data_x.shape[1],
+                    image_height=data_x.shape[2],
+                    image_width=data_x.shape[3],
                     emb_dim=32).to(self.config.device)
                 train_variational_autoencoder(
                     model, data_x, n_epochs=100, batch_size=64, verbose=True)
             else:
-                model = VariationalAutoencoder(**self.config.vae_params).to(self.config.device)
+                model = VariationalAutoencoder(
+                    **self.config.vae_params).to(self.config.device)
                 train_variational_autoencoder(
                     model, data_x, n_epochs=100, batch_size=1024, verbose=False)
-            coreset_idx = np.array(KCenter(self.config.size).fit_transform(
-                model(data_x).cpu().detach().numpy()))
+
+            embedded = model(data_x).cpu().detach().numpy()
+            self.last_data_embedding = embedded
+            if self.config.method == 'vae-k-center':
+                coreset_idx = np.array(
+                    KCenter(self.config.size).fit_transform(embedded))
+            elif self.config.method == 'vae-k-means':
+                coreset_idx = get_medoid_idxs(KMeans(self.config.size, n_init='auto').fit(
+                    embedded).cluster_centers_, embedded)
+            elif self.config.method == 'vae-hierarchical':
+                coreset_idx = get_medoid_idxs_from_labels(AgglomerativeClustering(
+                    self.config.size).fit(embedded).labels_, embedded)
+            elif self.config.method == 'vae-spectral':
+                coreset_idx = get_medoid_idxs_from_labels(SpectralClustering(
+                    self.config.size).fit(embedded).labels_, embedded)
+            else:
+                raise ValueError(
+                    f"Invalid coreset builder method: {self.config.method}")
         else:
-            raise ValueError(f"Invalid coreset builder method: {self.config.method}")
+            raise ValueError(
+                f"Invalid coreset builder method: {self.config.method}")
 
         self.last_coreset_idx = coreset_idx
         train_idx = np.delete(np.arange(data_x.shape[0]), coreset_idx)
